@@ -78,9 +78,29 @@ func (c *canonicalHeader) run(pass *analysis.Pass) (any, error) {
 
 	nodeFilter := []ast.Node{
 		(*ast.CallExpr)(nil),
+		(*ast.IndexExpr)(nil),
+		(*ast.CompositeLit)(nil),
 	}
 
 	spctor.Preorder(nodeFilter, func(n ast.Node) {
+		switch t := n.(type) {
+		// h["Test-Header"].
+		case *ast.IndexExpr:
+			if isHTTPHeader(pass.TypesInfo.TypeOf(t.X)) {
+				checkMapKey(pass, t.Index)
+			}
+
+			return
+
+		// http.Header{"Test-Header": nil}.
+		case *ast.CompositeLit:
+			if isHTTPHeader(pass.TypesInfo.TypeOf(t)) {
+				checkLiteralKeys(pass, t)
+			}
+
+			return
+		}
+
 		callExp, ok := n.(*ast.CallExpr)
 		if !ok {
 			return
@@ -174,6 +194,14 @@ func (c *canonicalHeader) run(pass *analysis.Pass) (any, error) {
 			obj := pass.TypesInfo.ObjectOf(ident)
 			gotType = obj.Type()
 
+		// delete(h, "Test-Header").
+		case *types.Builtin:
+			if len(callExp.Args) == 2 && t.Name() == "delete" && isHTTPHeader(pass.TypesInfo.TypeOf(callExp.Args[0])) {
+				checkMapKey(pass, callExp.Args[1])
+			}
+
+			return
+
 		default:
 			return
 		}
@@ -194,64 +222,8 @@ func (c *canonicalHeader) run(pass *analysis.Pass) (any, error) {
 			return
 		}
 
-		callArg := callExp.Args[0]
-
-		// Check for type casting from myString to string.
-		// it could be: Get(string(string(string(myString)))).
-		// need this node------------------------^^^^^^^^.
-		for {
-			// If it is not *ast.CallExpr, this is a value.
-			c, ok := callArg.(*ast.CallExpr)
-			if !ok {
-				break
-			}
-
-			// Some function is called, skip this case.
-			if len(c.Args) == 0 {
-				return
-			}
-
-			f, ok := c.Fun.(*ast.Ident)
-			if !ok {
-				break
-			}
-
-			obj := pass.TypesInfo.ObjectOf(f)
-			// nil may be by code, but not by logic.
-			// TypeInfo should contain of type.
-			if obj == nil {
-				break
-			}
-
-			// This is function.
-			// Skip this method call.
-			_, ok = obj.Type().(*types.Signature)
-			if ok {
-				return
-			}
-
-			callArg = c.Args[0]
-		}
-
-		var arg argumenter
-		switch t := callArg.(type) {
-		case *ast.BasicLit:
-			lString, err := newLiteralString(t)
-			if err != nil {
-				return
-			}
-
-			arg = lString
-
-		case *ast.Ident:
-			constString, err := newConstantKey(pass.TypesInfo, t)
-			if err != nil {
-				return
-			}
-
-			arg = constString
-
-		default:
+		arg, ok := newArgument(pass.TypesInfo, callExp.Args[0])
+		if !ok {
 			return
 		}
 
@@ -267,6 +239,124 @@ func (c *canonicalHeader) run(pass *analysis.Pass) (any, error) {
 
 	//nolint:nilnil // This is expected by the signature of the callback.
 	return nil, nil
+}
+
+// checkMapKey reports keys that bypass canonicalization through direct map
+// access: exclusions do not apply, since any other spelling is a silent miss.
+func checkMapKey(pass *analysis.Pass, key ast.Expr) {
+	arg, ok := newArgument(pass.TypesInfo, key)
+	if !ok {
+		return
+	}
+
+	argValue := arg.value()
+
+	headerKeyCanonical := http.CanonicalHeaderKey(argValue)
+	if argValue == headerKeyCanonical {
+		return
+	}
+
+	pass.Report(arg.diagnostic(headerKeyCanonical))
+}
+
+// checkLiteralKeys is checkMapKey for composite literal keys, without a fix
+// when it would duplicate another key, which does not compile.
+func checkLiteralKeys(pass *analysis.Pass, lit *ast.CompositeLit) {
+	args := make([]argumenter, 0, len(lit.Elts))
+	counts := make(map[string]int, len(lit.Elts))
+
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+
+		arg, ok := newArgument(pass.TypesInfo, kv.Key)
+		if !ok {
+			continue
+		}
+
+		args = append(args, arg)
+		counts[http.CanonicalHeaderKey(arg.value())]++
+	}
+
+	for _, arg := range args {
+		argValue := arg.value()
+
+		headerKeyCanonical := http.CanonicalHeaderKey(argValue)
+		if argValue == headerKeyCanonical {
+			continue
+		}
+
+		diagnostic := arg.diagnostic(headerKeyCanonical)
+		if counts[headerKeyCanonical] > 1 {
+			diagnostic.SuggestedFixes = nil
+		}
+
+		pass.Report(diagnostic)
+	}
+}
+
+func newArgument(info *types.Info, arg ast.Expr) (argumenter, bool) {
+	expr := arg
+
+	// Check for type casting from myString to string.
+	// it could be: Get(string(string(string(myString)))).
+	// need this node------------------------^^^^^^^^.
+	for {
+		// If it is not *ast.CallExpr, this is a value.
+		c, ok := expr.(*ast.CallExpr)
+		if !ok {
+			break
+		}
+
+		// Some function is called, skip this case.
+		if len(c.Args) == 0 {
+			return nil, false
+		}
+
+		f, ok := c.Fun.(*ast.Ident)
+		if !ok {
+			break
+		}
+
+		obj := info.ObjectOf(f)
+		// nil may be by code, but not by logic.
+		// TypeInfo should contain of type.
+		if obj == nil {
+			break
+		}
+
+		// This is function.
+		// Skip this method call.
+		_, ok = obj.Type().(*types.Signature)
+		if ok {
+			return nil, false
+		}
+
+		expr = c.Args[0]
+	}
+
+	switch t := expr.(type) {
+	case *ast.BasicLit:
+		lString, err := newLiteralString(t)
+		if err != nil {
+			return nil, false
+		}
+
+		return lString, true
+
+	case *ast.Ident:
+		constString, err := newConstantKey(info, t)
+		if err != nil {
+			return nil, false
+		}
+
+		return constString, true
+
+	default:
+		return nil, false
+	}
 }
 
 func canonicalHeaderKey(s string, m map[string]string) string {

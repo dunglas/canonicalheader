@@ -43,6 +43,7 @@ func TestAnalyzer(t *testing.T) {
 		{pkg: "global"},
 		{pkg: "initialism"},
 		{pkg: "mapaccess"},
+		{pkg: "qualified"},
 		{pkg: "responsewriter"},
 		{pkg: "struct"},
 		{pkg: "underlying"},

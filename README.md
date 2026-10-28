@@ -90,3 +90,13 @@ delete(h, "Test-HEader")                              // flagged
 _ = http.Header{"Test-HEader": nil}                   // flagged
 _ = h["ETag"]                                         // flagged, net/http stores "Etag"
 ```
+
+### Constant expressions
+
+Keys built from qualified constants or constant expressions are reported
+without a suggested fix, since there is no single literal to rewrite.
+
+```go
+v.Get(otherpkg.TestHEader) // flagged
+v.Get("X-" + "test-header") // flagged
+```

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/types"
 	"net/http"
 
@@ -355,8 +356,24 @@ func newArgument(info *types.Info, arg ast.Expr) (argumenter, bool) {
 		return constString, true
 
 	default:
+		return newConstantExpr(info, expr)
+	}
+}
+
+// newConstantExpr covers constant keys that are neither a literal nor a local
+// identifier, such as pkg.Key or "X-" + suffix. There is no single literal to
+// rewrite, so it reports without a fix.
+func newConstantExpr(info *types.Info, expr ast.Expr) (argumenter, bool) {
+	tv, ok := info.Types[expr]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.String {
 		return nil, false
 	}
+
+	return constantString{
+		originalValue: constant.StringVal(tv.Value),
+		pos:           expr.Pos(),
+		end:           expr.End(),
+	}, true
 }
 
 func canonicalHeaderKey(s string, m map[string]string) string {

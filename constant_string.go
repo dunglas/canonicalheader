@@ -24,6 +24,11 @@ func newConstantKey(info *types.Info, ident *ast.Ident) (constantString, error) 
 		return constantString{}, fmt.Errorf("type %T is not support", c)
 	}
 
+	// string(r) with a rune constant r carries an integer value.
+	if c.Val().Kind() != constant.String {
+		return constantString{}, fmt.Errorf("constant %s is not a string", c.Name())
+	}
+
 	return constantString{
 		nameOfConst:   c.Name(),
 		originalValue: constant.StringVal(c.Val()),

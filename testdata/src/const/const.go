@@ -15,6 +15,8 @@ type myString string
 
 const underlyingString myString = "TT"
 
+const runeConst = 't'
+
 func _() {
 	var mstr myString = "Tt"
 	http.Header{}.Get(string(mstr))
@@ -24,4 +26,5 @@ func _() {
 	http.Header{}.Get(noCanonical)              // want `use "Tt" instead of "TT"`
 	http.Header{}.Get(copiedFromNoCanonical)    // want `use "Tt" instead of "TT"`
 	http.Header{}.Get(canonical)
+	http.Header{}.Get(string(runeConst))
 }
